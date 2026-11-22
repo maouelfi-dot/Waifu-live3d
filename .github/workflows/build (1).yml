@@ -1,0 +1,65 @@
+name: Build APK
+
+# Cara pakai: upload file ZIP proyek ini (MitaLive_APK.zip) ke repo GitHub kamu apa adanya
+# (taruh di root repo), lalu jalankan: Actions > Build APK > Run workflow.
+# Workflow ini otomatis meng-unzip zip tersebut, lalu membangun APK.
+# Kalau kamu sudah mengekstrak isi zip ke repo, workflow langsung membangun dari file yang ada.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cari proyek (unzip otomatis bila ada .zip)
+        id: find
+        run: |
+          set -e
+          mkdir -p /tmp/proj
+          if [ -f settings.gradle ]; then
+            cp -r . /tmp/proj/
+          else
+            Z=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
+            if [ -z "$Z" ]; then echo "Tidak ada settings.gradle maupun file .zip di root repo"; exit 1; fi
+            echo "Meng-unzip $Z"
+            unzip -q -o "$Z" -d /tmp/proj
+          fi
+          S=$(find /tmp/proj -name settings.gradle -not -path "*/node_modules/*" | head -n1)
+          if [ -z "$S" ]; then echo "settings.gradle tidak ditemukan di zip"; exit 1; fi
+          echo "dir=$(dirname "$S")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Buat kunci tanda tangan otomatis
+        run: |
+          keytool -genkeypair -v -keystore /tmp/release.jks -alias mita -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass mitalive -keypass mitalive -dname "CN=Mita Live"
+
+      - name: Build APK RELEASE (bertanda tangan, siap pasang)
+        working-directory: ${{ steps.find.outputs.dir }}
+        env:
+          KS_FILE: /tmp/release.jks
+          KS_PASS: mitalive
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Kumpulkan APK
+        run: |
+          mkdir -p out
+          cp "$(find ${{ steps.find.outputs.dir }}/app/build/outputs/apk/release -name '*.apk' | head -n1)" out/MitaLive.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MitaLive-APK
+          path: out/MitaLive.apk
