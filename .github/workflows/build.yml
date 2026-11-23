@@ -1,63 +1,73 @@
-name: Build APK
+name: Build APK Native Mita Live
 
-# Cara pakai: upload file ZIP proyek ini (MitaLive_APK.zip) ke repo GitHub kamu apa adanya
-# (taruh di root repo), lalu jalankan: Actions > Build APK > Run workflow.
-# Workflow ini otomatis meng-unzip zip tersebut, lalu membangun APK.
-# Kalau kamu sudah mengekstrak isi zip ke repo, workflow langsung membangun dari file yang ada.
+# Cukup upload MitaNative.zip (tanpa diekstrak) + file ini ke repo GitHub.
+# Workflow akan mengekstrak ZIP di server GitHub lalu membangun APK-nya.
 on:
-  push:
   workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cari proyek (unzip otomatis bila ada .zip)
-        id: find
+      - name: Cari proyek (ekstrak ZIP otomatis bila perlu)
+        shell: bash
         run: |
-          set -e
-          mkdir -p /tmp/proj
-          if [ -f settings.gradle ]; then
-            cp -r . /tmp/proj/
+          set -euo pipefail
+          if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
+            PROJ="$GITHUB_WORKSPACE"
+            echo "Proyek sudah terekstrak di root repo."
           else
-            Z=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
-            if [ -z "$Z" ]; then echo "Tidak ada settings.gradle maupun file .zip di root repo"; exit 1; fi
-            echo "Meng-unzip $Z"
-            unzip -q -o "$Z" -d /tmp/proj
+            ZIP=""
+            if [ -f MitaNative.zip ]; then ZIP="MitaNative.zip"
+            else ZIP="$(find . -maxdepth 3 -iname '*.zip' -not -path './.git/*' -printf '%s %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)"; fi
+            if [ -z "$ZIP" ]; then echo "::error::Tidak ada settings.gradle maupun file .zip di repo. Upload MitaNative.zip ke root repo."; exit 1; fi
+            echo "Mengekstrak: $ZIP"
+            mkdir -p "$RUNNER_TEMP/src"
+            unzip -q -o "$ZIP" -d "$RUNNER_TEMP/src"
+            S="$(find "$RUNNER_TEMP/src" \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*__MACOSX*' | awk '{ print length($0) " " $0 }' | sort -n | head -n1 | cut -d' ' -f2-)"
+            if [ -z "$S" ]; then echo "::error::settings.gradle tidak ditemukan di dalam ZIP."; exit 1; fi
+            PROJ="$(dirname "$S")"
           fi
-          S=$(find /tmp/proj -name settings.gradle -not -path "*/node_modules/*" | head -n1)
-          if [ -z "$S" ]; then echo "settings.gradle tidak ditemukan di zip"; exit 1; fi
-          echo "dir=$(dirname "$S")" >> "$GITHUB_OUTPUT"
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Folder proyek: $PROJ"
+          ls "$PROJ"
 
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+        with: { gradle-version: '8.9' }
 
-      - name: Buat kunci tanda tangan otomatis
-        run: |
-          keytool -genkeypair -v -keystore /tmp/release.jks -alias mita -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass mitalive -keypass mitalive -dname "CN=Mita Live"
-
-      - name: Build APK RELEASE (bertanda tangan, siap pasang)
-        working-directory: ${{ steps.find.outputs.dir }}
+      - name: Siapkan keystore (opsional, dari GitHub Secrets)
+        shell: bash
         env:
-          KS_FILE: /tmp/release.jks
-          KS_PASS: mitalive
-        run: gradle assembleRelease --no-daemon --stacktrace
-
-      - name: Kumpulkan APK
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          mkdir -p out
-          cp "$(find ${{ steps.find.outputs.dir }}/app/build/outputs/apk/release -name '*.apk' | head -n1)" out/MitaLive.apk
+          if [ -n "$KS_B64" ]; then echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"; echo "KS_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"; fi
+
+      - name: Build APK rilis
+        shell: bash
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          cd "$PROJ"
+          gradle assembleRelease --no-daemon --stacktrace
+          mkdir -p "$GITHUB_WORKSPACE/apk-out"
+          cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/apk-out/MitaLive-native.apk"
+          ls -la "$GITHUB_WORKSPACE/apk-out"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MitaLive-APK
-          path: out/MitaLive.apk
+          name: MitaLive-native-apk
+          path: apk-out/MitaLive-native.apk
+          retention-days: 30
+          if-no-files-found: error
